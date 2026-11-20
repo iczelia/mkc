@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mkc"
+version = "1.0.0"
+description = "Exact DNA k-mer counting (k <= 32) with compact, fast-to-query indexes"
+readme = {file = "README", content-type = "text/plain"}
+requires-python = ">=3.8"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+packages = ["mkc"]

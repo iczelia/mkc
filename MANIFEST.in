@@ -1,0 +1,7 @@
+include configure.ac Makefile.am bootstrap README COPYING
+include build-aux/version.sh
+recursive-include m4 *.m4
+recursive-include src *.c *.h
+recursive-include tests *.c *.py *.sh
+include deps/build.sh
+include python/mkc/_mkc.c

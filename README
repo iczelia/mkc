@@ -1,0 +1,96 @@
+mkc - exact DNA k-mer counting in C
+===================================
+
+mkc counts every canonical k-mer (1 <= k <= 32) of FASTA/FASTQ input, plain
+or compressed (gzip, BGZF, zstd, lz4), and writes a memory-mapped index
+answering point queries.
+
+Build requirements: a C99 compiler with the GCC/Clang extensions (GCC or
+Clang; MinGW-w64 on Windows) and a 64-bit target. By default make builds
+ISA-L 2.32.1 (gzip), zstd 1.5.7 and lz4 1.10.0 from pinned, SHA-256-checked
+release tarballs and links them statically, so the binary has no library
+dependencies (curl or wget on the first build; NASM 2.16.03 for ISA-L's x86
+code if no NASM >= 2.14 is installed).
+
+configure checks whether the compiler can build the AVX2/BMI2 kernels; the
+binary uses them when both the CPU and the operating system support them
+(CPUID and XGETBV), chosen at run time.
+
+    ./bootstrap             # from a Git checkout (autoconf, automake)
+    ./configure
+    make                    # ./mkc
+    make check              # tests
+    make check-full         # check the table layout
+    make python             # Python extension + bundled CLI, tested
+    make examples           # examples/query, examples/batch
+    pip install .           # or install the Python package
+
+| Configure option | Effect |
+| --- | --- |
+| --disable-simd | build the portable scanner and lookups only |
+| --enable-sanitizers | build with ASan and UBSan |
+| --with-bundled-deps=no/auto | link the system libraries (auto: if all are present) |
+| --host=x86_64-w64-mingw32 | Windows (MinGW-w64), with bundled libraries |
+
+    ./mkc build -k 31 -t 16 -o genome.mkc genome.fa.gz
+    ./mkc build -k 21 -o reads.mkc reads_1.fastq.zst reads_2.fastq.zst
+    ./mkc info genome.mkc
+    ./mkc query genome.mkc ACGTACGTACGTACGTACGTACGTACGTACG
+    ./mkc query genome.mkc - < kmers.txt
+    ./mkc dump genome.mkc
+
+Options: -v/--version prints the version and the SIMD kernels; -k (default 31),
+-m minimizer length (default min(12,max(9,k-8)), at most k), -t
+threads (default: online CPUs), -M workspace MiB (default 6400), -T
+temporary directory (default TMPDIR, then /tmp; on Windows the user's
+temporary directory), --no-sync (skip the final fsync), -o output. Options
+precede inputs; use -- before a path beginning with '-'. One '-' input reads
+stdin. Multiple inputs accumulate into one index. The output is published
+atomically (rename) only after a complete build.
+
+C API (src/mkc.h)
+-------------------
+Header-only C99, for POSIX or Win32 (MinGW-w64). An open index is immutable
+and safe to share between threads. mkc_open reads an index of 64 MiB or more
+into memory backed by large pages when it takes at most half of the available
+memory and large pages are available (random lookups then avoid most page
+walks): transparent huge pages on Linux, MEM_LARGE_PAGES on Windows (needs
+the "Lock pages in memory" right), 2 MiB superpages on Intel Macs. Otherwise,
+and always with mkc_open_mapped, it maps the file read-only.
+
+    #include "mkc.h"
+    mkc_index db;
+    if (mkc_open(&db, "genome.mkc")) { /* errno */ }
+    uint64_t count;
+    if (mkc_count(&db, dna, len, &count)) { /* not k bases of ACGT */ }
+    count = mkc_count_key(&db, key);           /* 2-bit packed, A=0..T=3 */
+    mkc_count_batch(&db, keys, counts, n);     /* prefetches ahead */
+    mkc_count_sequence(&db, read, len, counts);   /* every window of a sequence, batched */
+    mkc_iterator it = {0}; uint64_t key;
+    while (mkc_next(&db, &it, &key, &count)) { ... }
+    /* in parallel: positions 0..mkc_iter_end(&db), split into ranges [a, b) */
+    mkc_iterator r = {a};
+    while (r.at < b && mkc_next(&db, &r, &key, &count) && r.at-1 < b) { ... }
+    mkc_close(&db);
+
+Keys are packed with the first base most significant; either orientation is
+accepted. See examples/query.c and examples/batch.c. On x86-64 with AVX2 and
+BMI1/BMI2 (and an OS that saves AVX state), opening an index selects lookup
+code compiled for its k and record width (224 point kernels, plus 21 for packed
+buckets, one per low-part width, and block kernels for the batch API); other CPUs
+use the portable path.
+
+Python
+------
+    import mkc
+    idx = mkc.build(["genome.fa.gz"], "genome.mkc", k=31, threads=16)
+    idx["ACGTACGTACGTACGTACGTACGTACGTACG"]   # count, either orientation
+    idx.count_keys(keys)        # any uint64 buffer (numpy, array('Q')); GIL released
+    idx.count_sequence(read)    # count of every k-mer window (0 if it has an N)
+    for kmer, count in idx: ...
+    len(idx), idx.total, idx.k, idx.layout
+    mkc.encode("ACGT"), mkc.decode(27, 4)
+
+mkc.Index(path) opens an existing index (mapped=True to always memory-map
+it, see the C API). mkc.build runs the bundled mkc binary ($MKC_BINARY
+overrides it).
