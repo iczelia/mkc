@@ -19,6 +19,7 @@ static void dec_scalar(u8 * p, sz n) {
 
 static u8 * batch;
 static sz blen, bdec;
+static u64 bput;
 static void (*decode)(u8 *, sz) = dec_scalar;
 static mkc_task scan_task;
 
@@ -123,6 +124,7 @@ static void batch_flush(void) {
 }
 
 static void seq_put(const u8 * s, sz n) {
+  bput += n;
   while (n) {
     sz take = BATCH - blen;
     if (take > n) take = n;
@@ -337,6 +339,7 @@ static void fq_commit(const u8 * out, fq_slice * sl, u32 n) {
   fq_job job = {NULL, out, NULL, NULL, sl, 0, 0, 0, 0, 0, 0};
   Fj(n, total += sl[j].out);
   bdec_sync();
+  bput += total;
   while (job.done < total) {
     job.take = MIN(BATCH - blen, total - job.done);
     job.dst = batch + blen;
@@ -355,13 +358,30 @@ typedef struct {
   const char * name;  reader r;  int mode, fasta;
   u8 * carry;  sz clen, ccap, at, end;
   const u8 * b;
+  u8 tail[32];  u32 tlen;  u64 mark;
 } stream;
+
+static void stream_resume(stream * s) {
+  u8 again[32] = {255};
+  fq_slice one = {0, 0, 0, 1 + (sz) s->tlen, 0};
+  if (bput == s->mark) return;
+  memcpy(again + 1, s->tail, s->tlen);
+  fq_commit(again, &one, 1);
+  s->mark = bput;
+}
+
+static void stream_pause(stream * s) {
+  const sz keep = (sz) MIN(K - 1, s->tlen + (bput - s->mark));
+  bdec_sync();
+  memcpy(s->tail, batch + blen - keep, keep);
+  s->tlen = (u32) keep;  s->mark = bput;
+}
 
 static void stream_open(stream * s, const char * name) {
   mkc_file fd;
   memset(s, 0, sizeof *s);
   s->name = name;
-  seq_cut();
+  seq_cut();  s->mark = bput;
   fd = !strcmp(name, "-") ? os_stdin()
                           : os_open(name, MKC_READ | MKC_SEQUENTIAL);
   if (fd == MKC_NO_FILE) FATAL("cannot open input %s: %s", name, os_error());
@@ -514,9 +534,12 @@ static void parse_all(int argc, char ** argv, int first) {
     for (active = 1; active;) {
       active = 0;
       Fj(n, if (st[j].mode != STREAM_PARALLEL) continue;
-            stream_step(&st[j], out);  active = 1);
+            stream_resume(&st[j]);  stream_step(&st[j], out);
+            stream_pause(&st[j]);  active = 1);
     }
-    Fj(n, if (st[j].mode != STREAM_DONE) stream_serial(&st[j]);
+    Fj(n, if (st[j].mode != STREAM_DONE) {
+            stream_resume(&st[j]);  stream_serial(&st[j]);
+          }
           stream_close(&st[j]));
     i += (int) n;
   }
