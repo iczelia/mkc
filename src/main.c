@@ -230,7 +230,8 @@ static int do_dump(const char * path) {
 
 static int rereadable(int argc, char ** argv, int first) {
   int i;
-  for (i = first; i < argc; i++) if (!strcmp(argv[i], "-")) return 0;
+  for (i = first; i < argc; i++)
+    if (!strcmp(argv[i], "-") || !os_is_regular(argv[i])) return 0;
   return 1;
 }
 

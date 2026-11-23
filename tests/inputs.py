@@ -6,7 +6,7 @@ of their indexes; damaged inputs fail with an error.
 usage: inputs.py ./mkc ./pack-test [small]
 'small' marks a build with tiny read blocks, where units larger than a
 block are streamed instead of decoded in parallel."""
-import collections, gzip, os, random, re, struct, subprocess, sys, tempfile, zlib
+import collections, gzip, os, random, re, struct, subprocess, sys, tempfile, threading, zlib
 
 mkc, pack = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 small = len(sys.argv) > 3 and sys.argv[3] == 'small'
@@ -59,11 +59,15 @@ def packed(mode, data, *args):
     return subprocess.run([pack, mode, *map(str, args)], input=data, capture_output=True, check=True).stdout
 
 
-def build(path, threads, tmp, stdin=None):
+def build(path, threads, tmp, stdin=None, skip=0, memory=512, timeout=None):
     out = os.path.join(tmp, 'o.mkc')
-    with open(stdin, 'rb') if stdin else open(os.devnull, 'rb') as f:
-        r = subprocess.run([mkc, 'build', '-k', '25', '-t', str(threads), '-M', '512', '-T', tmp, '-o', out,
-                            *([path] if isinstance(path, str) else path)], stdin=f, capture_output=True)
+    with open(stdin or os.devnull, 'rb', buffering=0) as f:
+        f.seek(skip)
+        try:
+            r = subprocess.run([mkc, 'build', '-k', '25', '-t', str(threads), '-M', str(memory), '-T', tmp, '-o', out,
+                                *([path] if isinstance(path, str) else path)], stdin=f, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, 'no end after %d s' % timeout, 0
     if r.returncode:
         return None, r.stderr.decode().strip(), 0
     m = re.search(r'\((\d+) in parallel\)', r.stderr.decode())
@@ -199,6 +203,70 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('MKC_TEST_TMP')) as tmp:
             if got is None or tally(got) != want:
                 failed += 1; print(f'FAIL together {case} t={t}: {err or "index differs"}')
         print(f'together {case} ok', flush=True)
+    def stored(text, size):
+        for _ in range(64):
+            member = deflate_member(text, 0)
+            if len(member) == size: return member, text
+            text = text[:size - len(member)] if len(member) > size else text + b'A' * (size - len(member))
+        raise AssertionError('no stored member of %d bytes' % size)
+    for back in (17, 20, 24):
+        first, text = stored(b'>a\n' + b'ACGTTGCATG' * (block // 10), block - back)
+        second = b'\n>b\n' + ''.join(rng.choices('ACGT', k=300)).encode() + b'\n'
+        with open(plain, 'wb') as f:
+            f.write(text + second)
+        want, err, _ = build(plain, 1, tmp)
+        assert want, err
+        path = os.path.join(tmp, 'gzip-header-split')
+        with open(path, 'wb') as f:
+            f.write(first + deflate_member(second, 6, b'reads_1.fastq\x00a comment here\x00', 8 | 16))
+        for t in (1, 4):
+            got, err, _ = build(path, t, tmp)
+            if got != want:
+                failed += 1; print(f'FAIL gzip-header-split {back} t={t}: {err or "index differs"}')
+    print('gzip-header-split ok', flush=True)
+    text = fasta(3)
+    at = text.index(b'>', 1)
+    with open(plain, 'wb') as f:
+        f.write(text[at:])
+    want, err, _ = build(plain, 1, tmp)
+    assert want, err
+    with open(plain, 'wb') as f:
+        f.write(text)
+    for inputs in ('-', ['-', '-']):
+        got, err, _ = build(inputs, 4, tmp, stdin=plain, skip=at)
+        if got != want:
+            failed += 1; print(f'FAIL stdin-offset {inputs}: {err or "index differs"}')
+    print('stdin-offset ok', flush=True)
+    if hasattr(os, 'mkfifo'):
+        fifo = os.path.join(tmp, 'fifo')
+        os.mkfifo(fifo)
+        def feed():
+            try:
+                with open(fifo, 'wb') as f:
+                    f.write(text[at:])
+            except OSError:
+                pass
+        for t in (1, 4):
+            writer = threading.Thread(target=feed, daemon=True)
+            writer.start()
+            got, err, _ = build(fifo, t, tmp, timeout=300)
+            os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+            writer.join(60)
+            if got != want:
+                failed += 1; print(f'FAIL fifo t={t}: {err or "index differs"}')
+        os.unlink(fifo)
+        print('fifo ok', flush=True)
+    if not small:
+        unit = ''.join(rng.choices('ACGT', k=6800))
+        with open(plain, 'wb') as f:
+            f.write(b'>r\n' + (unit * 5001).encode() + b'\n')
+        want, err, _ = build(plain, 1, tmp)
+        assert want, err
+        for t, memory in ((1, 1), (16, 1), (16, 2)):
+            got, err, _ = build('-', t, tmp, stdin=plain, memory=memory)
+            if got != want:
+                failed += 1; print(f'FAIL heavy-bin t={t} M={memory}: {err or "index differs"}')
+        print('heavy-bin ok', flush=True)
     # Empty inputs, plain and compressed, give an empty index.
     for name, blob in (('empty', b''), ('empty-gzip', gzip.compress(b'')), ('empty-zstd', packed('zstd-frame', b'', 3)),
                        ('empty-lz4', packed('lz4', b'', 4, 1, 0, 1, 1, 0))):

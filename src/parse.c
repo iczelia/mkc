@@ -512,7 +512,7 @@ static int is_packed(const char * name) {
   mkc_file f;
   u8 head[IN_HEAD] = {0};
   ptrdiff_t got;
-  if (!strcmp(name, "-")) return 0;
+  if (!strcmp(name, "-") || !os_is_regular(name)) return 0;
   f = os_open(name, MKC_READ);
   if (f == MKC_NO_FILE) return 0;
   got = os_file_size(f) > 0 ? os_pread(f, head, IN_HEAD, 0) : 0;

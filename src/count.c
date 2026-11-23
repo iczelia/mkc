@@ -522,38 +522,89 @@ static int (*const count_tables[33])(u32, sz, u64 *, u64 *,
   NULL, EACH_K(TABLE_ENTRY)
 };
 
-static void heavy_spill(u32 bin, u32 * nruns, u64 * a,
-                        u64 * tmp, sz n, u32 hbits) {
+#define HEAVY_FANIN 64u
+
+static u32 heavy_fanin = 2;
+
+static file_writer * run_create(u32 bin, u32 id) {
   char rp[4096];
-  file_writer * out;
-  u8 rec[16];
-  sz x;
-  hsort_a(a, tmp, n, hbits);
-  snprintf(rp, sizeof rp, "%s/r%u-%u", workdir, bin, (*nruns)++);
-  out = xmalloc(sizeof *out);
+  file_writer * out = xmalloc(sizeof *out);
+  snprintf(rp, sizeof rp, "%s/r%u-%u", workdir, bin, id);
   out->off = 0;  out->n = 0;
   out->f = os_open(rp, MKC_WRITE | MKC_CREATE | MKC_TRUNCATE | MKC_SCRATCH);
   if (out->f == MKC_NO_FILE) FATAL("temporary write failed: %s", os_error());
+  return out;
+}
+
+static void run_put(file_writer * out, u64 h, u64 c) {
+  u8 rec[16];
+  wr64le(rec, h);  wr64le(rec + 8, c);
+  writer_put(out, rec, 16);
+}
+
+static void heavy_spill(u32 bin, u32 * nruns, u64 * a,
+                        u64 * tmp, sz n, u32 hbits) {
+  file_writer * out;
+  sz x;
+  hsort_a(a, tmp, n, hbits);
+  out = run_create(bin, (*nruns)++);
   for (x = 0; x < n;) {
     sz y = x + 1;
     while (y < n && a[y] == a[x]) y++;
-    wr64le(rec, a[x]);  wr64le(rec + 8, y - x);
-    writer_put(out, rec, 16);
+    run_put(out, a[x], y - x);
     x = y;
   }
   writer_close(out);  xfree(out);
+}
+
+typedef struct { run_reader * readers, ** heap;  sz live;  u32 n; } run_merge;
+
+static void merge_open(run_merge * m, u32 bin, u32 from, u32 n) {
+  sz i;
+  u32 j;
+  m->readers = xmalloc(n * sizeof *m->readers);
+  m->heap = xmalloc(n * sizeof *m->heap);
+  m->live = 0;  m->n = n;
+  Fj(n,
+    char rp[4096];
+    run_reader * r = &m->readers[j];
+    snprintf(rp, sizeof rp, "%s/r%u-%u", workdir, bin, from + j);
+    if ((r->in.f = os_open(rp, MKC_READ)) == MKC_NO_FILE)
+      FATAL("temporary read failed: %s", os_error());
+    os_remove(rp);
+    r->in.off = 0;  r->in.pos = r->in.end = 0;
+    r->live = 1;  run_next(r);
+    if (r->live) m->heap[m->live++] = r);
+  for (i = m->live / 2; i-- > 0;) heap_down(m->heap, m->live, i);
+}
+
+static int merge_next(run_merge * m, u64 * h, u64 * c) {
+  if (!m->live) return 0;
+  *h = m->heap[0]->h;  *c = 0;
+  while (m->live && m->heap[0]->h == *h) {
+    *c += m->heap[0]->c;  run_next(m->heap[0]);
+    if (!m->heap[0]->live) m->heap[0] = m->heap[--m->live];
+    heap_down(m->heap, m->live, 0);
+  }
+  return 1;
+}
+
+static void merge_close(run_merge * m) {
+  u32 j;
+  Fj(m->n, os_close(m->readers[j].in.f));
+  xfree(m->readers);  xfree(m->heap);
 }
 
 static INLINE void count_heavy_k(u32 bin, sz cap, u64 * a,
                                  u64 * tmp, file_reader * s,
                                  spool_stats * st, const u32 kl) {
   const u32 hbits = mkc_code_bits(kl);
-  u32 nruns = 0, piece = 0, j;
-  sz n = 0, live = 0, limit = cap / 3 - 16, held = 0, i;
-  u64 * hs = a, * cs = a + cap / 2;
+  u32 nruns = 0, piece = 0, first;
+  sz n = 0, limit = cap / 3 - 16, held = 0;
+  u64 * hs = a, * cs = a + cap / 2, key, count;
   run_view r;
   char path[4096];
-  run_reader * readers, ** heap;
+  run_merge mg;
   bin_open(s, bin);
   while (bin_next(s, kl, &r))
     RUN_HASHES(r, kl, {
@@ -563,26 +614,16 @@ static INLINE void count_heavy_k(u32 bin, sz cap, u64 * a,
   if (n) heavy_spill(bin, &nruns, a, tmp, n, hbits);
   os_close(s->f);
   bin_path(path, bin, "b");  os_remove(path);
-  readers = xmalloc(nruns * sizeof *readers);
-  heap = xmalloc(nruns * sizeof *heap);
-  Fj(nruns,
-    char rp[4096];
-    snprintf(rp, sizeof rp, "%s/r%u-%u", workdir, bin, j);
-    if ((readers[j].in.f = os_open(rp, MKC_READ)) == MKC_NO_FILE)
-      FATAL("temporary read failed: %s", os_error());
-    os_remove(rp);
-    readers[j].in.off = 0;  readers[j].in.pos = readers[j].in.end = 0;
-    readers[j].live = 1;  run_next(&readers[j]);
-    if (readers[j].live) heap[live++] = &readers[j]);
-  for (i = live / 2; i-- > 0;) heap_down(heap, live, i);
-  while (live) {
-    u64 h = heap[0]->h, c = 0;
-    while (live && heap[0]->h == h) {
-      c += heap[0]->c;  run_next(heap[0]);
-      if (!heap[0]->live) heap[0] = heap[--live];
-      heap_down(heap, live, 0);
-    }
-    hs[held] = h;  cs[held] = c;
+  for (first = 0; nruns - first > heavy_fanin; first += heavy_fanin) {
+    file_writer * out = run_create(bin, nruns++);
+    merge_open(&mg, bin, first, heavy_fanin);
+    while (merge_next(&mg, &key, &count)) run_put(out, key, count);
+    merge_close(&mg);
+    writer_close(out);  xfree(out);
+  }
+  merge_open(&mg, bin, first, nruns - first);
+  while (merge_next(&mg, &key, &count)) {
+    hs[held] = key;  cs[held] = count;
     if (++held == limit) {
       if (piece + 1 >= 1u << 18)
         FATAL("bin %u has too many distinct k-mers for -M", bin);
@@ -590,8 +631,7 @@ static INLINE void count_heavy_k(u32 bin, sz cap, u64 * a,
     }
   }
   if (held) spool_pairs(bin, piece, hs, cs, held, tmp, st);
-  Fj(nruns, os_close(readers[j].in.f));
-  xfree(readers);  xfree(heap);
+  merge_close(&mg);
 }
 
 #define HEAVY_INSTANCE(kl)                                                    \
@@ -625,7 +665,7 @@ static u64 occ_guess(int argc, char ** argv, int first) {
     ptrdiff_t got;
     u64 bytes;
     u32 scale;
-    if (!strcmp(argv[i], "-")) continue;
+    if (!strcmp(argv[i], "-") || !os_is_regular(argv[i])) continue;
     f = os_open(argv[i], MKC_READ);
     if (f == MKC_NO_FILE) continue;
     size = os_file_size(f);
@@ -737,9 +777,17 @@ static u64 spool_build(int argc, char ** argv, int first, u64 memory,
     while (few < nbins && expected > (u64) SMALL_BIN * few) few *= 2;
     nbins = few;
   }
-  if (os_fdlimit((u64) nbins + SPOOL_PARTS + 64))
-    FATAL("need an open-file limit of at least %u",
-          nbins + SPOOL_PARTS + 64);
+  {
+    const u32 need = SPOOL_PARTS + 64 + nbins;
+    if (os_fdlimit(need))
+      FATAL("need an open-file limit of at least %u", need);
+    for (heavy_fanin = HEAVY_FANIN; heavy_fanin > 2
+         && os_fdlimit((u64) SPOOL_PARTS + 64
+                       + (u64) (heavy_fanin + 1) * threads);
+         heavy_fanin /= 2) {}
+    if (heavy_fanin == 2)
+      (void) os_fdlimit((u64) SPOOL_PARTS + 64 + (u64) 3 * threads);
+  }
   scanners = scan_slots();
   producers = xcalloc(scanners, sizeof *producers);
   Fi(scanners,

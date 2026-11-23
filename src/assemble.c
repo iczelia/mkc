@@ -111,7 +111,7 @@ static slice * sl_load(u32 first, u32 n, const u64 * sizes,
     if (seen != records[part]) FATAL("spool record mismatch");
     got += want;
   }
-  qsort(slices, ns, sizeof *slices, sl_cmp);
+  if (ns) qsort(slices, ns, sizeof *slices, sl_cmp);
   for (i = 1; i < ns; i++)
     if (slices[i].order == slices[i - 1].order) FATAL("duplicate spool slice");
   *count = ns;
@@ -1082,7 +1082,7 @@ static void hash_worker(void * arg, u32 id, u32 m) {
     } else if (os_unmap(view, vlen)) {
       FATAL("unmap index: %s", os_error());
     }
-    sl_done(slices, ns);
+    if (!mg_gave_up) sl_done(slices, ns);
     sl_unmap(maps, step);
   }
   exc_flush(ob);  exc_flush(sb);  exc_flush(db);

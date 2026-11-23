@@ -576,6 +576,26 @@ SI i64 os_path_size(const char * path) {
   return s;
 }
 
+SI int os_is_regular(const char * path) {
+#ifdef _WIN32
+  return os_path_size(path) >= 0;
+#else
+  struct stat st;
+  return !stat(path, &st) && S_ISREG(st.st_mode);
+#endif
+}
+
+SI i64 os_take(mkc_file f) {
+#ifdef _WIN32
+  (void) f;
+  return -1;
+#else
+  const off_t at = lseek((int) f, 0, SEEK_CUR);
+  if (at < 0 || lseek((int) f, 0, SEEK_END) < 0) return -1;
+  return (i64) at;
+#endif
+}
+
 SI int os_set_size(mkc_file f, u64 size) {
 #ifdef _WIN32
   FILE_END_OF_FILE_INFO e;

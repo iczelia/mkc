@@ -307,6 +307,7 @@ static int bgzf_run(input * in) {
 
 static void gzip_run(input * in) {
   struct inflate_state * st = xmalloc(sizeof *st);
+  struct isal_gzip_header head;
   outblock o = {NULL, 0};
   int parallel = decoders.size > 1 && READ_BLOCK >= 65536;
   for (;;) {
@@ -323,6 +324,21 @@ static void gzip_run(input * in) {
       break;
     }
     isal_inflate_init(st);  st->crc_flag = ISAL_GZIP;
+    isal_gzip_header_init(&head);
+    for (;;) {
+      sz avail;
+      int ret;
+      if (in->pos == in->end) {
+        raw_more(in, 1);
+        if (in->pos == in->end) FATAL("%s: truncated gzip input", in->name);
+      }
+      avail = MIN(in->end - in->pos, 1u << 30);
+      st->next_in = in->raw + in->pos;  st->avail_in = (u32) avail;
+      ret = isal_read_gzip_header(st, &head);
+      in->pos += avail - st->avail_in;
+      if (ret == ISAL_DECOMP_OK) break;
+      if (ret != ISAL_END_INPUT) FATAL("%s: %s", in->name, isal_error(ret));
+    }
     for (;;) {
       sz avail, before;
       int ret;
@@ -672,8 +688,13 @@ static input * input_start(const char * name, mkc_file fd) {
   in->name = name;  in->fd = fd;  in->format = "plain";
   size = os_file_size(fd);
   in->regular = size >= 0;
+  if (in->regular && !strcmp(name, "-")) {
+    const i64 at = os_take(fd);
+    if (at < 0) in->regular = 0;
+    else { in->offset = (u64) at;  size = at < size ? size - at : 0; }
+  }
   if (in->regular && READ_BLOCK % RAW_ALIGN == 0
-      && (u64) size > os_mem() / 4
+      && in->offset % RAW_ALIGN == 0 && (u64) size > os_mem() / 4
       && !os_set_direct(&in->fd, 1)) in->direct = 1;
   Fi(READ_RING, in->blocks[i] = xpages(READ_BLOCK));
   mx_init(&in->mutex);  cv_init(&in->cond);
