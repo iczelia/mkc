@@ -23,17 +23,16 @@ typedef struct {
 } run_view;
 
 #define RUN_HASHES(r, kl, ...) do {                                           \
-  u64 key_ = (r).first, rc_ = mkc_revcomp(key_, kl);                          \
+  u64 key_ = (r).first, rc_ = mkc_revcomp(key_, kl), more_ = (r).suffix;      \
   const u64 seed_ = mkc_seed_word(table_seed, mkc_code_bits(kl));             \
-  u32 i_;                                                                     \
-  for (i_ = 0; i_ <= (r).ext; i_++) {                                         \
+  u32 left_ = (r).ext;                                                        \
+  for (;;) {                                                                  \
     u64 h = mkc_hash(mkc_code(key_, rc_, kl) ^ seed_, mkc_code_bits(kl));     \
     __VA_ARGS__;                                                              \
-    if (i_ < (r).ext) {                                                       \
-      u32 c_ = (u32) ((r).suffix >> (2 * i_)) & 3;                            \
-      key_ = ((key_ << 2) | c_) & mkc_mask(kl);                               \
-      rc_ = (rc_ >> 2) | ((u64) (3 - c_) << (2 * kl - 2));                    \
-    }                                                                         \
+    if (!left_--) break;                                                      \
+    key_ = ((key_ << 2) | (more_ & 3)) & mkc_mask(kl);                        \
+    rc_ = (rc_ >> 2) | ((3 - (more_ & 3)) << (2 * kl - 2));                   \
+    more_ >>= 2;                                                              \
   }                                                                           \
 } while (0)
 
@@ -107,11 +106,12 @@ static MKC_TLS u64 * fit_area;
 static MKC_TLS u64 fit_staging[2048][8];
 
 static INLINE int fit_buf(u32 bin, const u64 * src0, sz n0,
-                          const u64 * src1, sz n1, u32 shift, sz * reps,
-                          u64 * buf, u64 * scratch, spool_stats * st) {
+                          const u64 * src1, sz n1, const u64 * next,
+                          u32 shift, sz * reps, u64 * buf, u64 * scratch,
+                          spool_stats * st) {
   if (n0 + n1 > FIT_BUFFER) return 0;
-  if (n0) hsort_dup((u64 *) src0, buf, n0, shift, reps);
-  if (n1) hsort_dup((u64 *) src1, buf + n0, n1, shift, reps);
+  if (n0) hsort_dup((u64 *) src0, buf, n0, shift, reps, src1);
+  if (n1) hsort_dup((u64 *) src1, buf + n0, n1, shift, reps, next);
   if (n0 + n1) spool_sorted(bin, 0, buf, n0 + n1, scratch, st);
   return 1;
 }
@@ -170,9 +170,10 @@ static INLINE sz count_fit_k(const u8 * in, sz size, sz expect, u32 lo,
       RUN_HASHES(r, kl, {
         d = (u32) (h >> shift);
         if (d - lo < span) {
-          stg[d][fill[d]++] = h;
-          if (fill[d] == 8) {
-            fill[d] = 0;
+          u32 f = fill[d];
+          stg[d][f] = h;
+          fill[d] = (u8) (++f & 7);
+          if (f == 8) {
             if (pos[d] < ((sz) d - lo + 1) * room) {
               stream_line(tmp + pos[d], stg[d]);  pos[d] += 8;
             } else if (scap - ns >= 8) {
@@ -207,14 +208,16 @@ static INLINE sz count_fit_k(const u8 * in, sz size, sz expect, u32 lo,
           sz held1 = pos[d + 1] - (d - lo + 1) * room;
           if (held == hist[d] && held1 == hist[d + 1]
               && fit_buf(bin, tmp + (d - lo) * room, held,
-                         tmp + (d - lo + 1) * room, held1, shift, &reps,
-                         buf, scratch, st)) {
+                         tmp + (d - lo + 1) * room, held1,
+                         tmp + (d - lo + 2) * room, shift, &reps, buf,
+                         scratch, st)) {
             fill[d + 1] = 0;  d++;  continue;
           }
         }
         if (!fill[d]) {
           if (held)
-            hsort_dup(tmp + (d - lo) * room, a + at[d], held, shift, &reps);
+            hsort_dup(tmp + (d - lo) * room, a + at[d], held, shift, &reps,
+                      tmp + (d - lo + 1) * room);
         } else {
           memcpy(a + at[d], tmp + (d - lo) * room, held * 8);
           pos[d] = at[d] + held;
@@ -255,10 +258,12 @@ static INLINE sz count_fit_k(const u8 * in, sz size, sz expect, u32 lo,
       RUN_HASHES(r, kl, {
         d = (u32) (h >> shift);
         if (d - lo < span) {
-          stg[d][fill[d]++] = h;
-          if (fill[d] == 8) {
+          u32 f = fill[d];
+          stg[d][f] = h;
+          fill[d] = (u8) (++f & 7);
+          if (f == 8) {
             stream_line(tmp + pos[d], stg[d]);
-            pos[d] += 8;  fill[d] = 0;
+            pos[d] += 8;
           }
         }
       });
@@ -278,10 +283,13 @@ static INLINE sz count_fit_k(const u8 * in, sz size, sz expect, u32 lo,
   for (d = lo; d < hi; d++) {
     if (fused && !(d & 1)
         && fit_buf(bin, tmp + off[d], hist[d], tmp + off[d + 1],
-                   hist[d + 1], shift, &reps, buf, scratch, st)) {
+                   hist[d + 1], tmp + off[d + 2], shift, &reps, buf, scratch,
+                   st)) {
       d++;  continue;
     }
-    if (hist[d]) hsort_dup(tmp + off[d], a + at[d], hist[d], shift, &reps);
+    if (hist[d])
+      hsort_dup(tmp + off[d], a + at[d], hist[d], shift, &reps,
+                tmp + off[d + 1]);
     if (fused && (d & 1))
       later[d >> 1] = !fit_emit(bin, a, at, hist, d >> 1, scratch, st);
   }

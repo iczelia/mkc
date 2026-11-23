@@ -37,6 +37,9 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 #include <sys/resource.h>
+#ifdef __linux__
+#include <sys/vfs.h>
+#endif
 #endif
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -594,6 +597,18 @@ SI int os_reserve(mkc_file f, u64 size) {
   return fallocate((int) f, 0, 0, (off_t) size);
 #else
   errno = EOPNOTSUPP;  return -1;
+#endif
+}
+
+SI int os_in_memory(mkc_file f) {
+#ifdef __linux__
+  struct statfs s;
+  u32 type;
+  if (fstatfs((int) f, &s)) return 0;
+  type = (u32) s.f_type;
+  return type == 0x01021994u || type == 0x858458F6u || type == 0x958458F6u;
+#else
+  return 0;
 #endif
 }
 

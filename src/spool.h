@@ -45,6 +45,10 @@ static const u64 inl_max[SPOOL_ABOVE] = {
   127, 255, 65535, UINT32_MAX, 2, 6, 14, 30, 62, 1
 };
 
+static u64 spool_mixed[256];
+static u8 spool_class[256];
+static const u8 spool_rank[SPOOL_ABOVE] = {6, 7, 8, 9, 1, 2, 3, 4, 5, 0};
+
 static struct {
   char dir[4096];
   u32 hbits, low;
@@ -57,9 +61,7 @@ SI void spc_word(spc_writer * w, u64 v) {
   Fi(8, w->out[w->bytes++] = (u8) (v >> (8 * i)));
 }
 
-SI void spc_put(spc_writer * w, u64 v, u32 n) {
-  if (!n) return;
-  v &= mkc_bits(n);
+SI void spc_put_bits(spc_writer * w, u64 v, u32 n) {
   w->acc |= v << w->used;
   if (w->used + n >= 64) {
     u32 spill;
@@ -67,6 +69,10 @@ SI void spc_put(spc_writer * w, u64 v, u32 n) {
     spill = 64 - w->used;
     w->acc = spill < 64 ? v >> spill : 0;  w->used = w->used + n - 64;
   } else w->used += n;
+}
+
+SI void spc_put(spc_writer * w, u64 v, u32 n) {
+  if (n) spc_put_bits(w, v & mkc_bits(n), n);
 }
 
 SI void spc_unary(spc_writer * w, u64 q) {
@@ -98,8 +104,8 @@ SI void spc_encode(spc_writer * w, int first, u64 prev,
   if (!first && count == 1) {
     gap = suffix - prev - 1;  q = gap >> l;
     if (q + l + 2 <= 64) {
-      spc_put(w, (UINT64_C(1) << q) | ((gap & mkc_bits(l)) << (q + 1)),
-              (u32) (q + l + 2));
+      spc_put_bits(w, (UINT64_C(1) << q) | ((gap & mkc_bits(l)) << (q + 1)),
+                   (u32) (q + l + 2));
       return;
     }
   }
@@ -176,10 +182,15 @@ SI int spc_decode(spc_reader * r, int first, u64 prev,
   return r->pos <= r->limit ? 0 : -1;
 }
 
+SI u64 spool_sum(u64 h, u64 mixed) {
+  const u128 p = (u128) (h ^ mixed) * UINT64_C(0x9E3779B97F4A7C15);
+  return (u64) p ^ (u64) (p >> 64);
+}
+
 SI void spool_note(spool_stats * s, u64 h, u64 count) {
   u32 i;
   s->distinct++;  s->total += count;
-  s->checksum += mkc_mix(h ^ (count == 1 ? mkc_mix(1) : mkc_mix(count)));
+  s->checksum += spool_sum(h, mkc_mix(count));
   if (count > 1) Fi(SPOOL_ABOVE, s->above[i] += count > inl_max[i]);
 }
 
@@ -202,6 +213,10 @@ SI void spool_begin(const char * dir, u32 hbits) {
     FATAL("spool path too long");
   if (os_make_dir(spool.dir)) FATAL("create spool: %s", os_error());
   spool.hbits = hbits;  spool.low = hbits - SPOOL_BITS;
+  Fi(256,
+    u32 j;
+    spool_mixed[i] = mkc_mix(i);  spool_class[i] = 0;
+    Fj(SPOOL_ABOVE, spool_class[i] += i > inl_max[j]));
   Fi(SPOOL_PARTS,
     spool.sizes[i] = spool.records[i] = 0;  spool.fds[i] = MKC_NO_FILE);
 }
@@ -256,31 +271,42 @@ SI void spool_sorted(u32 bin, u32 piece,
                      u64 * scratch, spool_stats * st) {
   const u32 low = spool.low;
   const u64 mask = mkc_bits(low);
-  spool_stats tally = {0, 0, {0, 0, 0, 0}, 0, {0}};
+  u64 distinct = 0, checksum = 0, classes[SPOOL_ABOVE + 1] = {0};
   sz at, p;
+  u32 i;
   for (at = 0; at < n;) {
     u32 rice, part = (u32) (keys[at] >> low);
-    sz end = at;
-    u64 prev = 0, records = 0;
+    sz end, same = 0;
+    u64 prev = 0, records;
     spc_writer w = {(u8 *) scratch, 0, 0, 0};
-    while (end < n && (u32) (keys[end] >> low) == part) {
-      u64 h = keys[end];
-      records++;
-      while (end < n && keys[end] == h) end++;
-    }
+    if ((u32) (keys[n - 1] >> low) == part) end = n;
+    else for (end = at + 1; (u32) (keys[end] >> low) == part; end++) {}
+    for (p = at + 1; p < end; p++) same += keys[p] == keys[p - 1];
+    records = end - at - same;  distinct += records;
     rice = spc_param(records, low);
     for (p = at; p < end;) {
-      u64 h = keys[p];
+      u64 h = keys[p], count, mixed;
       sz q = p + 1;
+      u32 level;
       while (q < end && keys[q] == h) q++;
-      spc_encode(&w, p == at, prev, h & mask, q - p, rice, low);
-      spool_note(&tally, h, q - p);  prev = h & mask;  p = q;
+      count = q - p;
+      spc_encode(&w, p == at, prev, h & mask, count, rice, low);
+      if (count < 256) {
+        mixed = spool_mixed[count];  level = spool_class[count];
+      } else {
+        mixed = mkc_mix(count);
+        level = 8 + (count > 65535) + (count > UINT32_MAX);
+      }
+      checksum += spool_sum(h, mixed);  classes[level]++;
+      prev = h & mask;  p = q;
     }
     spool_slice(part, (u64) bin << 18 | piece, rice, records, scratch,
                 spc_finish(&w));
     at = end;
   }
-  spool_tally(st, &tally);
+  for (i = SPOOL_ABOVE; i-- > 1;) classes[i] += classes[i + 1];
+  st->distinct += distinct;  st->total += n;  st->checksum += checksum;
+  Fi(SPOOL_ABOVE, st->above[i] += classes[spool_rank[i] + 1]);
 }
 
 SI void spool_pairs(u32 bin, u32 piece,

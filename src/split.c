@@ -27,6 +27,7 @@ typedef struct {
 typedef struct {
   binbuf * bins;
   u64 total, runs, bytes, * occ;
+  char pad[64];
 } producer;
 
 typedef struct {

@@ -491,13 +491,17 @@ SI void mp_poke(u64 * line, u32 at, u32 w, u64 v) {
   if (s + w > 64) line[x + 1] |= v >> (64 - s);
 }
 
-#define MP_CE(a, b) { const u64 p = x[a], q = x[b]; \
-  x[a] = p < q ? p : q;  x[b] = p < q ? q : p; }
+#define MP_CE(a, b) { const u64 p = x##a, q = x##b; \
+  x##a = p < q ? p : q;  x##b = p < q ? q : p; }
+#define MP_IN(i) { const u64 v = in[i]; \
+  x##i = i < n ? v << (64 - u) | v >> u : UINT64_MAX; }
+#define MP_OUT(i) r[i] = x##i >> (64 - u) | x##i << u;
 
 SI void mp_sort(const u64 * in, u32 n, u32 u, u64 * r) {
-  u64 x[16];
-  u32 i;
-  Fi(16, x[i] = i < n ? in[i] << (64 - u) | in[i] >> u : UINT64_MAX);
+  u64 x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14,
+      x15 = UINT64_MAX;
+  MP_IN(0) MP_IN(1) MP_IN(2) MP_IN(3) MP_IN(4) MP_IN(5) MP_IN(6) MP_IN(7)
+  MP_IN(8) MP_IN(9) MP_IN(10) MP_IN(11) MP_IN(12) MP_IN(13) MP_IN(14)
   MP_CE(0, 1) MP_CE(2, 3) MP_CE(0, 2) MP_CE(1, 3) MP_CE(1, 2) MP_CE(4, 5)
   MP_CE(6, 7) MP_CE(4, 6) MP_CE(5, 7) MP_CE(5, 6) MP_CE(0, 4) MP_CE(2, 6)
   MP_CE(2, 4) MP_CE(1, 5) MP_CE(3, 7) MP_CE(3, 5) MP_CE(1, 2) MP_CE(3, 4)
@@ -510,10 +514,22 @@ SI void mp_sort(const u64 * in, u32 n, u32 u, u64 * r) {
   MP_CE(3, 11) MP_CE(7, 15) MP_CE(7, 11) MP_CE(3, 5) MP_CE(7, 9)
   MP_CE(11, 13) MP_CE(1, 2) MP_CE(3, 4) MP_CE(5, 6) MP_CE(7, 8) MP_CE(9, 10)
   MP_CE(11, 12) MP_CE(13, 14)
-  Fi(n, r[i] = x[i] >> (64 - u) | x[i] << u);
+  MP_OUT(0) MP_OUT(1) MP_OUT(2) MP_OUT(3) MP_OUT(4) MP_OUT(5) MP_OUT(6)
+  MP_OUT(7) MP_OUT(8) MP_OUT(9) MP_OUT(10) MP_OUT(11) MP_OUT(12) MP_OUT(13)
+  MP_OUT(14) MP_OUT(15)
 }
 
+#undef MP_IN
+#undef MP_OUT
 #undef MP_CE
+
+SI void mp_store64(u8 * p, u64 v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  memcpy(p, &v, 8);
+#else
+  wr64le(p, v);
+#endif
+}
 
 typedef struct { u64 * line, acc;  u32 at; } mp_writer;
 
@@ -557,7 +573,7 @@ static void mp_encode(const mkc_index * d, u8 * table, const mp_work * w,
     Fj(e,
       mp_poke(line, 508 - 4 * j, 4, lidx[j]);
       mp_poke(line, 512 - 4 * e - (j + 1) * t, t, ltag[j]));
-    Fj(8, wr64le(table + 64 * i + 8 * j, line[j])));
+    Fj(8, mp_store64(table + 64 * i + 8 * j, line[j])));
   Fk(n2, mp_flag(d, table, (*sec)[k]));
   Fk(nst, mp_flag(d, table, st[k]));
 }
@@ -762,6 +778,72 @@ static void * out_writer(void * unused) {
   }
 }
 
+SI sz first_overflow(pair * restrict * ovf, sz * cap, sz n, u64 s, u32 tag) {
+  if (n == *cap) {
+    *cap = *cap ? 2 * *cap : 1024;
+    *ovf = xrealloc(*ovf, *cap * sizeof **ovf);
+  }
+  (*ovf)[n] = (pair) {s, tag};
+  return n + 1;
+}
+
+#define FIRST_FIT(...)                                                        \
+  const u64 cap = d->cap, recip = d->recip;                                   \
+  const u32 tshift = d->qbits + 1;                                            \
+  sz nov = 0, i, j;                                                           \
+  pair * restrict list = *ovf;                                                \
+  Fi(2,                                                                       \
+    const sz count = i ? n1 : narr;                                           \
+    Fj(count,                                                                 \
+      const u64 s = i ? ones[j] : order[j].s;                                 \
+      const u32 tag = i ? 1u : order[j].tag;                                  \
+      u64 q, pos, rec;                                                        \
+      if (recip) {                                                            \
+        q = (u64) (((u128) s * recip) >> 64);  q -= q * cap > s;              \
+      } else q = s / cap;                                                     \
+      pos = s - q * cap;  rec = q | (u64) tag << tshift;                      \
+      __VA_ARGS__                                                             \
+      nov = first_overflow(&list, ovcap, nov, s, tag)));                      \
+  *ovf = list;                                                                \
+  return nov;
+
+static NOINLINE sz first_fit_packed(const mkc_index * restrict d,
+                                    const mp_work * restrict w,
+                                    const placed * restrict order, sz narr,
+                                    const u64 * restrict ones, sz n1,
+                                    pair ** ovf, sz * ovcap) {
+  u64 * restrict rows = w->rec;
+  const u32 most = (u32) w->most[0] | (u32) w->most[1] << 8
+                   | (u32) w->most[2] << 16 | (u32) w->most[3] << 24;
+  FIRST_FIT({
+    u64 * restrict row = rows + 16 * pos;
+    const u64 head = *row;
+    const u32 n = (u32) (head & 255), e = (u32) (head >> 8) + (tag != 1);
+    if (e < 4 && n + 1 <= (most >> (8 * e) & 255)) {
+      row[1 + n] = rec;
+      *row = head + 1 + ((u64) (tag != 1) << 8);
+      continue;
+    }
+  })
+}
+
+static NOINLINE sz first_fit_records(const mkc_index * restrict d,
+                                     u8 * restrict table, u8 * restrict used,
+                                     const placed * restrict order, sz narr,
+                                     const u64 * restrict ones, sz n1,
+                                     pair ** ovf, sz * ovcap) {
+  const u32 slots = d->slots, bits = d->bits;
+  FIRST_FIT({
+    const u32 u = used[pos];
+    if (u < slots) {
+      mg_put(table + 64 * pos, u, bits, rec);
+      used[pos] = (u8) (u + 1);
+      continue;
+    }
+  })
+}
+#undef FIRST_FIT
+
 typedef struct {
   const assembly * a;  mkc_index * d;  const u64 * sizes, * records;
   u32 step, units, low;  sz maxb;
@@ -772,6 +854,102 @@ typedef struct {
   struct { u64 seen, check;  u128 sum;  char pad[64]; } * totals;
 } hash_job;
 
+typedef struct {
+  u64 * ones, * dcnt;
+  placed * arr;
+  pair * large;
+  sz n1, onecap, narr, ocap, ndc, dcap, nlg, lgcap;
+} group_keys;
+
+#ifndef HASH_BATCH
+#define HASH_BATCH 4
+#endif
+
+typedef struct {
+  u32 sbits, low, imax, dslots, sent;
+  u64 seen, check;
+  u128 sum;
+} key_sink;
+
+static NOINLINE u32 large_count(const key_sink * k, group_keys * q, u64 key,
+                                u64 count) {
+  if (q->ndc < k->dslots) {
+    if (q->ndc == q->dcap) {
+      q->dcap = q->dcap ? 2 * q->dcap : 256;
+      q->dcnt = xrealloc(q->dcnt, q->dcap * 8);
+    }
+    q->dcnt[q->ndc] = count;
+    return k->imax + 1 + (u32) q->ndc++;
+  }
+  if (q->nlg == q->lgcap) {
+    q->lgcap = q->lgcap ? 2 * q->lgcap : 256;
+    q->large = xrealloc(q->large, q->lgcap * sizeof *q->large);
+  }
+  q->large[q->nlg++] = (pair) {key, count};
+  return k->sent;
+}
+
+static NOINLINE void slice_keys(slice * restrict sl, group_keys * restrict gk,
+                                u64 g, u64 gend, key_sink * restrict k) {
+  const u32 sbits = k->sbits, low = k->low, l = sl->rice;
+  const u64 smask = mkc_bits(sbits), top = (u64) sl->part << low,
+            span = mkc_bits(low), lmask = mkc_bits(l), repeat = lmask + 1,
+            zmax = (span >> l) < 55 - l ? span >> l : 55 - l,
+            beyond = gend > (UINT64_MAX >> sbits)
+                     || (gend << sbits) - top > span
+                     ? span + 1 : (gend << sbits) - top;
+  const u8 * const base = sl->in.base;
+  const u64 limit = sl->in.limit, records = sl->records;
+  u64 pos = sl->in.pos, left = records, suffix = sl->suffix, c = sl->count,
+      check = 0;
+  u128 repeats = 0;
+  int live = 1;
+  for (;;) {
+    const u64 h = top | suffix;
+    group_keys * const q = &gk[(h >> sbits) - g];
+    if (LIKELY(c == 1)) {
+      check += spool_sum(h, mkc_mix(1));
+      if (UNLIKELY(q->n1 == q->onecap)) {
+        q->onecap = q->onecap ? 2 * q->onecap : 32768;
+        q->ones = xrealloc(q->ones, q->onecap * sizeof *q->ones);
+      }
+      q->ones[q->n1++] = h & smask;
+    } else {
+      const u32 tag = c > k->imax ? large_count(k, q, h, c) : (u32) c;
+      repeats += c - 1;  check += spool_sum(h, mkc_mix(c));
+      if (UNLIKELY(q->narr == q->ocap)) {
+        q->ocap = q->ocap ? 2 * q->ocap : 8192;
+        q->arr = xrealloc(q->arr, q->ocap * sizeof *q->arr);
+      }
+      q->arr[q->narr++] = (placed) {h & smask, tag,
+                                    (u32) (63 - __builtin_clzll(c))};
+    }
+    if (!left) { live = 0;  break; }
+    left--;
+    {
+      const u64 v = mkc_load64(base + (pos >> 3)) >> (pos & 7);
+      const u32 z = (u32) __builtin_ctzll(v | UINT64_C(1) << 56);
+      const u64 rest = v >> (z + 1);
+      if (LIKELY(z <= zmax && !(rest & repeat))) {
+        suffix += 1 + ((u64) z << l | (rest & lmask));  pos += z + l + 2;
+        if (UNLIKELY(suffix > span || pos > limit))
+          FATAL("corrupt spool slice");
+        c = 1;
+      } else {
+        spc_reader in = {base, pos, limit};
+        if (spc_decode(&in, 0, suffix, l, low, &suffix, &c))
+          FATAL("corrupt spool slice");
+        pos = in.pos;
+      }
+    }
+    if (suffix >= beyond) break;
+  }
+  sl->in.pos = pos;  sl->records = left;  sl->suffix = suffix;
+  sl->h = top | suffix;  sl->count = c;  sl->live = live;
+  left = records - left + !live;
+  k->seen += left;  k->sum += repeats + left;  k->check += check;
+}
+
 static void hash_worker(void * arg, u32 id, u32 m) {
   hash_job * jb = (hash_job *) arg;
   const assembly * a = jb->a;
@@ -779,19 +957,17 @@ static void hash_worker(void * arg, u32 id, u32 m) {
   const u32 low = jb->low, step = jb->step, sent = jb->sent,
             maxwalk = jb->maxwalk, imax = jb->imax, dslots = jb->dslots;
   const int direct = jb->direct;
-  u64 seen = 0, check = 0;
-  u128 sum = 0;
+  key_sink sink;
   u8 * buf = xmalloc(jb->maxb + 16), * used = xmalloc((sz) d->cap);
   const int packed = d->packed != 0;
   mp_work work = {NULL};
-  u64 * st = NULL, * sec = NULL, * dcnt = NULL, * ones = NULL;
-  sz nst = 0, stcap = 0, cap2 = 0, slcap = 0, lgcap = 0, ovcap = 0,
-     dcap = 0, ocap = 0, onecap = 0, i, j;
+  u64 * st = NULL, * sec = NULL;
+  sz nst = 0, stcap = 0, cap2 = 0, slcap = 0, ovcap = 0, ordcap = 0, i, j;
   slice * slices = NULL;
-  pair * large = NULL, * ovf = NULL;
-  placed * order = NULL, * arr = NULL;
+  pair * ovf = NULL;
+  placed * order = NULL;
+  group_keys gk[HASH_BATCH] = {{0}};
   const u32 sbits = d->sbits;
-  const u64 smask = mkc_bits(sbits);
   exc_batch * ob, * sb, * db;
   u64 align, k;
   slice_map * maps;
@@ -801,6 +977,7 @@ static void hash_worker(void * arg, u32 id, u32 m) {
   db = xmalloc(sizeof *db);
   ob->file = jb->over;  ob->used = 0;  sb->file = jb->stash;  sb->used = 0;
   db->file = jb->directs;  db->used = 0;
+  sink = (key_sink) {sbits, low, imax, dslots, sent, 0, 0, 0};
   align = os_map_align();
   maps = xcalloc(step, sizeof *maps);
   while (!mg_gave_up && (unit = fetch_add(&jb->next, 1u)) < jb->units) {
@@ -819,115 +996,79 @@ static void hash_worker(void * arg, u32 id, u32 m) {
     vlen = (sz) (to - vb);
     view = direct ? out_take() : os_map(a->fd, vb, vlen, 1);
     if (!view) FATAL("map index: %s", os_error());
-    for (g = g0; g <= g1 && !mg_gave_up; g++) {
-      sz nlg = 0, nov = 0, ndc = 0, narr = 0, n1 = 0, start[65] = {0};
-      u8 * table = view + (128 + 64 * d->cap * g - vb);
-      const u32 slots = d->slots, bits = d->bits;
-      u32 t;
-      if (direct) memset(table, 0, (sz) d->cap * 64);
-      memset(used, 0, (sz) d->cap);
-      if (packed) Fk(d->cap, work.rec[16 * k] = 0);
-      nst = 0;
+    for (g = g0; g <= g1 && !mg_gave_up; g += HASH_BATCH) {
+      const u64 gend = g1 - g < HASH_BATCH ? g1 + 1 : g + HASH_BATCH;
+      u32 turn;
+      Fi(HASH_BATCH,
+        gk[i].n1 = 0;  gk[i].narr = 0;  gk[i].ndc = 0;  gk[i].nlg = 0);
       Fi(ns,
-        slice local, * r;
-        if (!slices[i].live || (slices[i].h >> sbits) != g) continue;
-        local = slices[i];  r = &local;
-        while (r->live && (r->h >> sbits) == g) {
-          u64 h = r->h, c = r->count;
-          u32 tag, tier;
-          sl_next(r, low);
-          sum += c;  seen++;
-          check += mkc_mix(h ^ (c == 1 ? mkc_mix(1) : mkc_mix(c)));
-          tag = (u32) c;
-          if (c > imax && ndc < dslots) {
-            if (ndc == dcap) {
-              dcap = dcap ? 2 * dcap : 256;
-              dcnt = xrealloc(dcnt, dcap * 8);
-            }
-            dcnt[ndc] = c;
-            tag = imax + 1 + (u32) ndc++;
-          } else if (c > imax) {
-            if (nlg == lgcap) {
-              lgcap = lgcap ? 2 * lgcap : 256;
-              large = xrealloc(large, lgcap * sizeof *large);
-            }
-            large[nlg++] = (pair) {h, c};
-            exc_add(ob, h, c);  tag = sent;
-          }
-          if (c == 1) {
-            if (UNLIKELY(n1 == onecap)) {
-              onecap = onecap ? 2 * onecap : 65536;
-              ones = xrealloc(ones, onecap * sizeof *ones);
-            }
-            ones[n1++] = h & smask;
+        if (slices[i].live && (slices[i].h >> sbits) < gend)
+          slice_keys(&slices[i], gk, g, gend, &sink));
+      for (turn = 0; g + turn < gend && !mg_gave_up; turn++) {
+        const group_keys * const q = &gk[turn];
+        const u64 group = g + turn;
+        const placed * const arr = q->arr;
+        const sz narr = q->narr;
+        sz nov, start[65] = {0};
+        u8 * table = view + (128 + 64 * d->cap * group - vb);
+        u32 t;
+        if (direct) memset(table, 0, (sz) d->cap * 64);
+        memset(used, 0, (sz) d->cap);
+        if (packed) Fk(d->cap, work.rec[16 * k] = 0);
+        nst = 0;
+        Fi(q->nlg, exc_add(ob, q->large[i].key, q->large[i].count));
+        if (narr > ordcap) {
+          ordcap = 2 * narr;
+          order = xrealloc(order, ordcap * sizeof *order);
+        }
+        Fi(narr, start[64 - arr[i].tier]++);
+        for (t = 1; t <= 64; t++) start[t] += start[t - 1];
+        Fi(narr, order[start[63 - arr[i].tier]++] = arr[i]);
+        nov = packed ? first_fit_packed(d, &work, order, narr, q->ones, q->n1,
+                                        &ovf, &ovcap)
+                     : first_fit_records(d, table, used, order, narr,
+                                         q->ones, q->n1, &ovf, &ovcap);
+        for (i = 0; i < nov && !mg_gave_up; i++) {
+          u64 s = ovf[i].key, res, h, count;
+          u32 tag = (u32) ovf[i].count, rtag;
+          if (packed ? mp_place(d, &work, s, tag)
+                     : mg_place(d, table, used, s, tag))
             continue;
+          if (packed ? !mp_insert(d, &work, s, tag, maxwalk, &rng, &res,
+                                  &rtag)
+                     : !mg_insert(d, table, used, s, tag, maxwalk, &rng,
+                                  &res, &rtag))
+            continue;
+          h = group << d->sbits | res;  count = rtag;
+          if (rtag == sent) {
+            count = 0;
+            Fj(q->nlg,
+              if (q->large[j].key == h) { count = q->large[j].count;  break; });
+            if (!count) FATAL("lost displaced key");
+          } else if (rtag > imax) {
+            count = q->dcnt[rtag - imax - 1];
           }
-          if (narr == ocap) {
-            ocap = ocap ? 2 * ocap : 65536;
-            arr = xrealloc(arr, ocap * sizeof *arr);
-            order = xrealloc(order, ocap * sizeof *order);
+          exc_add(sb, h, count);
+          if (mg_limit) {
+            mx_lock(&exc_lock);
+            if (++mg_seen > mg_limit) mg_gave_up = 1;
+            mx_unlock(&exc_lock);
           }
-          tier = (u32) (63 - __builtin_clzll(c));
-          arr[narr++] = (placed) {h & smask, tag, tier};
-        }
-        slices[i] = local);
-      Fi(narr, start[64 - arr[i].tier]++);
-      for (t = 1; t <= 64; t++) start[t] += start[t - 1];
-      Fi(narr, order[start[63 - arr[i].tier]++] = arr[i]);
-      Fi(2,
-        const sz count = i ? n1 : narr;
-        Fj(count,
-          u64 s = i ? ones[j] : order[j].s, pos;
-          u32 tag = i ? 1u : order[j].tag;
-          u64 rec = mg_record(d, s, 0, tag, &pos);
-          if (packed ? mp_room(d, &work, pos, tag) : used[pos] < slots) {
-            if (packed) mp_add(d, &work, pos, rec);
-            else mg_put(table + 64 * pos, used[pos]++, bits, rec);
-          } else {
-            if (nov == ovcap) {
-              ovcap = ovcap ? 2 * ovcap : 1024;
-              ovf = xrealloc(ovf, ovcap * sizeof *ovf);
+          if (packed) {
+            if (nst == stcap) {
+              stcap = stcap ? 2 * stcap : 64;
+              st = xrealloc(st, stcap * 8);
             }
-            ovf[nov++] = (pair) {s, tag};
-          }));
-      for (i = 0; i < nov && !mg_gave_up; i++) {
-        u64 s = ovf[i].key, res, h, count;
-        u32 tag = (u32) ovf[i].count, rtag;
-        if (packed ? mp_place(d, &work, s, tag)
-                   : mg_place(d, table, used, s, tag))
-          continue;
-        if (packed ? !mp_insert(d, &work, s, tag, maxwalk, &rng, &res, &rtag)
-                   : !mg_insert(d, table, used, s, tag, maxwalk, &rng, &res,
-                                &rtag))
-          continue;
-        h = g << d->sbits | res;  count = rtag;
-        if (rtag == sent) {
-          count = 0;
-          Fj(nlg, if (large[j].key == h) { count = large[j].count;  break; });
-          if (!count) FATAL("lost displaced key");
-        } else if (rtag > imax) {
-          count = dcnt[rtag - imax - 1];
-        }
-        exc_add(sb, h, count);
-        if (mg_limit) {
-          mx_lock(&exc_lock);
-          if (++mg_seen > mg_limit) mg_gave_up = 1;
-          mx_unlock(&exc_lock);
-        }
-        if (packed) {
-          if (nst == stcap) {
-            stcap = stcap ? 2 * stcap : 64;
-            st = xrealloc(st, stcap * 8);
+            st[nst++] = res;
+          } else if (d->flags) {
+            mg_flag(d, table, res);
           }
-          st[nst++] = res;
-        } else if (d->flags) {
-          mg_flag(d, table, res);
         }
+        if (packed)
+          mp_encode(d, table, &work, st, nst, &sec, &cap2);
+        else if (d->flags) mg_flags(d, table);
+        Fi(q->ndc, exc_add(db, group << 24 | i, q->dcnt[i]));
       }
-      if (packed)
-        mp_encode(d, table, &work, st, nst, &sec, &cap2);
-      else if (d->flags) mg_flags(d, table);
-      Fi(ndc, exc_add(db, g << 24 | i, dcnt[i]));
     }
     if (direct) {
       u64 head = (from + 4095) & ~(u64) 4095,
@@ -948,10 +1089,12 @@ static void hash_worker(void * arg, u32 id, u32 m) {
   if (work.rec) os_pages_free(work.rec, (sz) d->cap * 128);
   xfree(st);  xfree(sec);
   xfree(ob);  xfree(sb);  xfree(db);  xfree(buf);  xfree(maps);  xfree(used);
-  xfree(slices);  xfree(large);  xfree(ovf);  xfree(dcnt);
-  xfree(order);  xfree(arr);  xfree(ones);
-  jb->totals[id].seen = seen;  jb->totals[id].check = check;
-  jb->totals[id].sum = sum;
+  xfree(slices);  xfree(ovf);  xfree(order);
+  Fi(HASH_BATCH,
+    xfree(gk[i].ones);  xfree(gk[i].arr);  xfree(gk[i].dcnt);
+    xfree(gk[i].large));
+  jb->totals[id].seen = sink.seen;  jb->totals[id].check = sink.check;
+  jb->totals[id].sum = sink.sum;
 }
 
 static u64 asm_hash(const assembly * a, mkc_index * d, const u64 * sizes,
@@ -987,7 +1130,8 @@ static u64 asm_hash(const assembly * a, mkc_index * d, const u64 * sizes,
   d->table_end = 128 + 64 * d->groups * d->cap;
   if (os_set_size(a->fd, d->table_end)) FATAL("reserve index: %s", os_error());
   per = d->groups / units ? d->groups / units : 1;
-  direct = d->groups >= units && 64 * d->cap * per >= 8192;
+  direct = d->groups >= units && 64 * d->cap * per >= 8192
+           && !os_in_memory(a->fd);
   dfd = direct ? os_open(a->path, MKC_WRITE | MKC_DIRECT) : MKC_NO_FILE;
   if (dfd == MKC_NO_FILE
       || os_reserve(a->fd, (d->table_end + 4095) & ~(u64) 4095)) {
@@ -1169,7 +1313,7 @@ static void dense_worker(void * arg, u32 id, u32 m) {
     Fi(n, for (r = &slices[i]; r->live; sl_next(r, low)) {
       u64 code = mkc_unhash(r->h, hbits)
                  ^ mkc_seed_word(table_seed, hbits), c = r->count;
-      sum += c;  seen++;  check += mkc_mix(r->h ^ mkc_mix(c));
+      sum += c;  seen++;  check += spool_sum(r->h, mkc_mix(c));
       if (c > imax) exc_add(ob, code, c);
       mg_store(jb->counts + 128 + width * code, width,
                c < imax ? c : imax);
