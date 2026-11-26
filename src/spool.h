@@ -239,6 +239,28 @@ SI void spool_writeback(mkc_file fd, u64 off, sz len) {
   if (hi > lo) os_writeback(fd, lo * win, (hi - lo) * win);
 }
 
+/* Count workers append complete slices. Assembly orders them by source,
+   so a worker may reserve a file offset for several slices at once. */
+#define SPOOL_PAGE_BYTES 8192u
+typedef struct {
+  u64 records;
+  sz used;
+  u8 data[SPOOL_PAGE_BYTES];
+} spool_page;
+
+static MKC_TLS spool_page * spool_pages;
+
+SI void spool_flush_page(u32 part) {
+  spool_page * page = &spool_pages[part];
+  mkc_file fd = spool_fd(part);
+  u64 off = fetch_add(&spool.sizes[part], (u64) page->used);
+  fetch_add(&spool.records[part], page->records);
+  if (os_pwrite_all(fd, page->data, page->used, off))
+    FATAL("spool write: %s", os_error());
+  spool_writeback(fd, off, page->used);
+  page->used = 0;  page->records = 0;
+}
+
 SI void spool_slice(u32 part, u64 source, u32 rice,
                     u64 records, const void * payload,
                     sz words) {
@@ -249,6 +271,14 @@ SI void spool_slice(u32 part, u64 source, u32 rice,
   wr64le(hdr, source | (u64) rice << 32);
   wr64le(hdr + 8, records);  wr64le(hdr + 16, words);
   len = 24 + 8 * words;
+  if (spool_pages && len <= SPOOL_PAGE_BYTES) {
+    spool_page * page = &spool_pages[part];
+    if (len > SPOOL_PAGE_BYTES - page->used) spool_flush_page(part);
+    memcpy(page->data + page->used, hdr, sizeof hdr);
+    memcpy(page->data + page->used + sizeof hdr, payload, 8 * words);
+    page->used += len;  page->records += records;
+    return;
+  }
   off = fetch_add(&spool.sizes[part], (u64) len);
   fetch_add(&spool.records[part], records);
   fd = spool_fd(part);

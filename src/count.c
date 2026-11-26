@@ -463,6 +463,30 @@ static int bin_next(file_reader * s, u32 kl, run_view * r) {
 
 #define TABLE_MAX (1u << 18)
 
+#define REPEAT_SLOTS (1u << 14)
+typedef struct {
+  u64 first, suffix;
+  u32 ext, count;
+} repeat_slot;
+
+/* On a collision, replay the previous run with its accumulated weight. */
+static INLINE u32 repeat_put(repeat_slot * cache, run_view * r) {
+  u64 h = mkc_mix(r->first ^ (r->suffix * UINT64_C(0x9e3779b97f4a7c15)) ^ r->ext);
+  repeat_slot * slot = &cache[h & (REPEAT_SLOTS - 1)];
+  u32 weight = slot->count;
+  if (weight && weight < UINT32_MAX && slot->first == r->first
+      && slot->suffix == r->suffix && slot->ext == r->ext) {
+    slot->count++;
+    return 0;
+  }
+  run_view old = {slot->first, slot->suffix, slot->ext};
+  *slot = (repeat_slot) {r->first, r->suffix, r->ext, 1};
+  *r = old;
+  return weight;
+}
+
+static MKC_TLS sz previous_distinct;
+
 static INLINE int count_table_k(u32 bin, sz cap, u64 * a,
                                 u64 * tmp, file_reader * s,
                                 spool_stats * st, const u32 kl) {
@@ -473,15 +497,37 @@ static INLINE int count_table_k(u32 bin, sz cap, u64 * a,
   run_view r;
   int ok = 1;
   char path[4096];
+  sz drain = 0;
+  repeat_slot * cache = NULL;
+  int eof = 0;
   if (limit < size) return 0;
+  while (size * 2 <= limit && size < 2 * previous_distinct) size *= 2;
+  /* Both hash tables occupy at most cap / 2 words during accumulation. */
+  if ((cap / 2) * sizeof *tmp >= REPEAT_SLOTS * sizeof *cache) {
+    cache = (repeat_slot *) (tmp + cap / 2);
+    memset(cache, 0, REPEAT_SLOTS * sizeof *cache);
+  }
   memset(table, 0, 2 * size * 8);
   bin_open(s, bin);
-  while (ok && bin_next(s, kl, &r)) {
+  while (ok) {
+    u32 weight = 1;
+    if (!eof && !bin_next(s, kl, &r)) eof = 1;
+    if (eof) {
+      if (!cache) break;
+      while (drain < REPEAT_SLOTS && !cache[drain].count) drain++;
+      if (drain == REPEAT_SLOTS) break;
+      repeat_slot * slot = &cache[drain++];
+      r = (run_view) {slot->first, slot->suffix, slot->ext};
+      weight = slot->count;
+    } else if (cache) {
+      weight = repeat_put(cache, &r);
+      if (!weight) continue;
+    }
     RUN_HASHES(r, kl, {
       sz x = h & (size - 1);
       while (table[2 * x + 1] && table[2 * x] != h) x = (x + 1) & (size - 1);
       if (!table[2 * x + 1]) { table[2 * x] = h;  used++; }
-      table[2 * x + 1]++;  seen++;
+      table[2 * x + 1] += weight;  seen += weight;
       if (2 * used > size) {
         u64 * t;
         if (2 * size > limit) { ok = 0;  break; }
@@ -499,6 +545,7 @@ static INLINE int count_table_k(u32 bin, sz cap, u64 * a,
   }
   os_close(s->f);
   if (!ok) return 0;
+  previous_distinct = used;
   bin_path(path, bin, "b");  os_remove(path);
   Fi(size, if (table[2 * i + 1]) other[n++] = table[2 * i]);
   hsort_a(other, other + n, n, hbits);
@@ -682,6 +729,7 @@ typedef struct {
   const u32 * order;
   const u64 * occ;
   sz cap, pass;
+  int batch_slices;
   spool_stats * stats;
   u32 next, tabled, misses;
 } count_job;
@@ -695,6 +743,8 @@ static void count_worker(void * arg, u32 id, u32 m) {
   file_reader * s;
   spool_stats * st = &J->stats[id];
   u32 x;
+  previous_distinct = 0;
+  if (J->batch_slices) spool_pages = xcalloc(SPOOL_PARTS, sizeof *spool_pages);
   fit_area = xpages((FIT_BUFFER + FIT_SCRATCH) * 8);
   s = xmalloc(sizeof *s);
   while ((x = fetch_add(&J->next, 1u)) < nbins) {
@@ -741,6 +791,11 @@ static void count_worker(void * arg, u32 id, u32 m) {
     if (view && os_unmap(view, (sz) size)) FATAL("unmap bin: %s", os_error());
     if (done) os_remove(path);
     else count_heavies[K](b, cap, a, tmp, s, st);
+  }
+  if (spool_pages) {
+    for (x = 0; x < SPOOL_PARTS; x++)
+      if (spool_pages[x].used) spool_flush_page(x);
+    xfree(spool_pages);  spool_pages = NULL;
   }
   os_pages_free(in, in_cap);  xfree(s);
   os_pages_free(a, cap * 8);  os_pages_free(tmp, cap * 8);
@@ -845,9 +900,15 @@ static u64 spool_build(int argc, char ** argv, int first, u64 memory,
   qsort(order, nbins, sizeof *order, bin_cmp);
   Fi(nbins, used += occ[i] != 0);
   pass = used ? (sz) (total / used) : 0;
+  /* Large bins already produce large writes. Reserve the staging pages
+     from the two per-worker arrays when small slices are expected. */
+  const sz page_bytes = SPOOL_PARTS * sizeof(spool_page);
+  int batch_slices = used && pass <= SPOOL_PARTS * (SPOOL_PAGE_BYTES / 8)
+                     && page_bytes <= cap * 2;
+  if (batch_slices) cap -= (page_bytes + 15) / 16;
   if (pass < ((sz) 1 << 20)) pass = (sz) 1 << 20;
   if (pass > cap) pass = cap;
-  job = (count_job) {order, occ, cap, pass, stats, 0, 0, 0};
+  job = (count_job) {order, occ, cap, pass, batch_slices, stats, 0, 0, 0};
   tp_run(pool, threads, count_worker, &job);
   xfree(occ);  xfree(order);
   spool_close();
