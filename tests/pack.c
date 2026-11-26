@@ -13,6 +13,10 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +54,10 @@ int main(int argc, char ** argv) {
   size_t n;
   unsigned char * in;
   if (argc < 2) fail("usage: see tests/pack.c");
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
   in = slurp(&n);
   if (!strcmp(argv[1], "zstd-frame") || !strcmp(argv[1], "zstd-stream")) {
     ZSTD_CCtx * c = ZSTD_createCCtx();

@@ -12,8 +12,9 @@ with tempfile.TemporaryDirectory() as tmp:
             subprocess.run([gen, str(k), str(n), str(p), str(r), want], stdout=f, check=True)
         expected = sorted(open(want).read().split('\n')[:-1])
         # 1. The stash path: reseeding disabled, most keys of the group must be stashed.
-        # 2. The default: the builder notices, builds again with the next hash seed, and the stash is empty.
-        for label, mkc in (('stash', stashing), ('reseeded', base)):
+        # POSIX can restart with the next hash seed. Windows keeps the stash.
+        default_label = 'stash' if os.name == 'nt' else 'reseeded'
+        for label, mkc in (('stash', stashing), (default_label, base)):
             digests = set()
             for threads in (1, 4):
                 subprocess.run([mkc, 'build', '-k', str(k), '-t', str(threads), '-o', idx, fa], check=True, stderr=subprocess.DEVNULL)

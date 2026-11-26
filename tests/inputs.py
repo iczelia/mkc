@@ -62,7 +62,8 @@ def packed(mode, data, *args):
 def build(path, threads, tmp, stdin=None, skip=0, memory=512, timeout=None):
     out = os.path.join(tmp, 'o.mkc')
     with open(stdin or os.devnull, 'rb', buffering=0) as f:
-        f.seek(skip)
+        if skip:
+            f.seek(skip)
         try:
             r = subprocess.run([mkc, 'build', '-k', '25', '-t', str(threads), '-M', str(memory), '-T', tmp, '-o', out,
                                 *([path] if isinstance(path, str) else path)], stdin=f, capture_output=True, timeout=timeout)

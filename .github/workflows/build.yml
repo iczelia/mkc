@@ -1,0 +1,117 @@
+name: Build
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  dist:
+    name: Package source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: |
+          ./bootstrap
+          ./configure
+          make dist-gzip
+          mv mkc-*.tar.gz source.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: source.tar.gz
+
+  native:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    needs: dist
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-26
+            arch: arm64
+          - os: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: source
+      - run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          tar -xzf source.tar.gz --strip-components=1
+          ./configure
+          make -j3
+          make -j3 check VERBOSE=1
+
+  cross:
+    name: Linux / ${{ matrix.arch }} (QEMU)
+    needs: dist
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: ppc64le
+            host: powerpc64le-linux-gnu
+            libc: ppc64el
+          - arch: riscv64
+            host: riscv64-linux-gnu
+            libc: riscv64
+          - arch: s390x
+            host: s390x-linux-gnu
+            libc: s390x
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: source
+      - name: Install cross compiler and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-${{ matrix.host }} libc6-dev-${{ matrix.libc }}-cross qemu-user
+      - name: Build for the target
+        run: |
+          tar -xzf source.tar.gz --strip-components=1
+          ./configure --build="$(sh build-aux/config.guess)" --host=${{ matrix.host }} \
+            CC=${{ matrix.host }}-gcc AR=${{ matrix.host }}-ar LDFLAGS=-static
+          make -j4 all
+          make -j4 tests/units
+      - name: Run unit and exact-count tests under QEMU
+        run: |
+          qemu-${{ matrix.arch }} ./tests/units
+          printf '#!/bin/sh\nexec qemu-%s "%s/mkc" "$@"\n' "${{ matrix.arch }}" "$PWD" > mkc-qemu
+          chmod +x mkc-qemu
+          python3 tests/exact.py ./mkc-qemu 7 14 31 32
+
+  windows:
+    name: Windows / x86_64 (UCRT64)
+    needs: dist
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: source
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make tar gzip diffutils coreutils grep sed gawk curl
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm mingw-w64-ucrt-x86_64-python
+      - run: |
+          tar -xzf source.tar.gz --strip-components=1
+          ./configure --build="$(sh build-aux/config.guess)" --host=x86_64-w64-mingw32 \
+            CC=gcc AR=ar PYTHON=/ucrt64/bin/python.exe
+          make -j4 all
+          make -j4 test-programs
+          ./mkc.exe --version
+          make -j1 check VERBOSE=1

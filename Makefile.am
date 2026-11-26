@@ -51,7 +51,7 @@ BUILT_SOURCES = $(MKC_DEPS_STAMP)
 $(MKC_DEPS_STAMP): $(top_srcdir)/deps/build.sh
 	$(AM_V_GEN)CC="$(CC)" AR="$(AR)" MKC_DEPS_OUT="$(abs_top_builddir)/deps/out" \
 	  MKC_DEPS_WORK="$(abs_top_builddir)/deps/work" \
-	  $(SHELL) $(top_srcdir)/deps/build.sh $(MKC_DEPS_TARGET)
+	  $(SHELL) $(top_srcdir)/deps/build.sh $(MKC_DEPS_TARGET) $(host_cpu)
 
 distclean-local:
 	-rm -rf deps/out deps/work

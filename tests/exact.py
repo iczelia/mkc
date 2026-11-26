@@ -5,7 +5,7 @@ Covers every k (1..32 by default), FASTA and FASTQ, N runs, lowercase,
 CRLF, empty and short records, heavy repeats (counts above every inline
 limit), forced oversized-bin chunking (-M), several thread counts, and
 both index layouts."""
-import collections, json, os, random, subprocess, sys, tempfile
+import collections, gzip, json, os, random, shutil, subprocess, sys, tempfile
 
 mkc = os.path.abspath(sys.argv[1])
 iterate = os.environ.get('MKC_TEST_ITERATE')   # tests/iterate.c, run on every index
@@ -93,7 +93,8 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('MKC_TEST_TMP')) as tmp:
         if k in (13, 21, 31) or len(ks) < 8:
             gz = fasta + '.gz'
             if not os.path.exists(gz):
-                subprocess.run(['sh', '-c', f'gzip -c {fasta} > {gz}'], check=True)
+                with open(fasta, 'rb') as src, gzip.open(gz, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
             for source, stdin in ((gz, None), ('-', fasta), ('-', gz)):
                 out = os.path.join(tmp, f'k{k}-in.mkc')
                 with open(stdin, 'rb') if stdin else open(os.devnull, 'rb') as f:

@@ -62,7 +62,7 @@ fetch() {
 
 case $target in
   native)
-    CC=${CC:-cc};  AR=${AR:-ar};  isal_arch=;  host=`uname -m` ;;
+    CC=${CC:-cc};  AR=${AR:-ar};  isal_arch=;  host=${2:-`uname -m`} ;;
   mingw)
     if test -z "${CC:-}"; then
       CC=x86_64-w64-mingw32-gcc
@@ -103,8 +103,9 @@ if test "$host" = x86_64; then
     asm=$tools/bin/nasm
   fi
   isal_cpu=x86_64
+  if test "$target" = native && test "`uname -s`" = Darwin; then isal_arch=Darwin; fi
 elif test "$host" = aarch64; then
-  isal_cpu=aarch64;  isal_arch=aarch64
+  isal_cpu=aarch64;  isal_arch=aarch64;  asm="$CC -D__ASSEMBLY__"
 else
   isal_cpu=base_aliases;  isal_arch=noarch
 fi
