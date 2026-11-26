@@ -59,7 +59,20 @@ def packed(mode, data, *args):
     return subprocess.run([pack, mode, *map(str, args)], input=data, capture_output=True, check=True).stdout
 
 
-def build(path, threads, tmp, stdin=None, skip=0, memory=512, timeout=None):
+def same_index(a, b):
+    if os.path.getsize(a) != os.path.getsize(b):
+        return False
+    with open(a, 'rb') as left, open(b, 'rb') as right:
+        while True:
+            chunk = left.read(1 << 20)
+            if chunk != right.read(1 << 20):
+                return False
+            if not chunk:
+                return True
+
+
+def build(path, threads, tmp, stdin=None, skip=0, memory=512, timeout=None,
+          save_index=None, reference=None):
     out = os.path.join(tmp, 'o.mkc')
     with open(stdin or os.devnull, 'rb', buffering=0) as f:
         if skip:
@@ -72,10 +85,16 @@ def build(path, threads, tmp, stdin=None, skip=0, memory=512, timeout=None):
     if r.returncode:
         return None, r.stderr.decode().strip(), 0
     m = re.search(r'\((\d+) in parallel\)', r.stderr.decode())
-    # Contents, not bytes: the number of bins follows an estimate of the
-    # input size that depends on the compression, and with it the layout.
-    data = sorted(subprocess.run([mkc, 'dump', out], capture_output=True, check=True).stdout.split(b'\n'))
-    os.unlink(out)
+    # Equal bytes imply equal counts. Compression or thread count can change
+    # the bin count and layout, so compare the dumped counts in that case.
+    if reference is not None and same_index(out, reference[0]):
+        data = reference[1]
+    else:
+        data = sorted(subprocess.run([mkc, 'dump', out], capture_output=True, check=True).stdout.split(b'\n'))
+    if save_index is None:
+        os.unlink(out)
+    else:
+        os.replace(out, save_index)
     return data, None, int(m.group(1)) if m else 0
 
 
@@ -93,8 +112,10 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('MKC_TEST_TMP')) as tmp:
         plain = os.path.join(tmp, 'in')
         with open(plain, 'wb') as f:
             f.write(data)
-        want, err, _ = build(plain, 1, tmp)
+        saved = os.path.join(tmp, 'plain.mkc')
+        want, err, _ = build(plain, 1, tmp, save_index=saved)
         assert want, err
+        reference = (saved, want)
         third = len(data)//3
         variants = [
             ('gzip', gzip.compress(data, 1), False),
@@ -125,12 +146,12 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('MKC_TEST_TMP')) as tmp:
             with open(path, 'wb') as f:
                 f.write(blob)
             for t in (1, 4, 16):
-                got, err, par = build(path, t, tmp)
+                got, err, par = build(path, t, tmp, reference=reference)
                 if got != want:
                     failed += 1; print(f'FAIL {kind} {name} t={t}: {err or "index differs"}')
                 elif t > 1 and parallel and not par:
                     failed += 1; print(f'FAIL {kind} {name} t={t}: nothing decoded in parallel')
-            got, err, _ = build('-', 4, tmp, stdin=path)
+            got, err, _ = build('-', 4, tmp, stdin=path, reference=reference)
             if got != want:
                 failed += 1; print(f'FAIL {kind} {name} stdin: {err or "index differs"}')
             print(f'{kind} {name} ok', flush=True)
