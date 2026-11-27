@@ -851,7 +851,8 @@ SI u64 os_map_align(void) {
   GetSystemInfo(&s);
   return s.dwAllocationGranularity ? s.dwAllocationGranularity : 65536;
 #else
-  return 4096;
+  long ps = sysconf(_SC_PAGESIZE);
+  return ps > 4096 ? (u64) ps : 4096;
 #endif
 }
 
