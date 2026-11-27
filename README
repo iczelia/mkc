@@ -1,5 +1,5 @@
-mkc - exact DNA k-mer counting in C
-===================================
+mkc - parsimonious exact DNA k-mer counting in C
+================================================
 
 mkc counts every canonical k-mer (1 <= k <= 32) of FASTA/FASTQ input, plain
 or compressed (gzip, BGZF, zstd, lz4), and writes a memory-mapped index
