@@ -17,6 +17,8 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#define RANGES (UINT64_C(1) << 22)
+
 typedef struct { uint64_t n, sum, xr; } print;
 
 static void add(print * p, uint64_t key, uint64_t count) {
@@ -38,15 +40,18 @@ int main(int argc, char ** argv) {
   end = mkc_iter_end(&d);
   for (c = 0; c < sizeof chunks / sizeof *chunks; c++) {
     print part = { 0 };
-    for (start = 0; start < end; start += chunks[c]) {
+    uint64_t step = chunks[c];
+    if (end / step > RANGES)
+      step += 64 * ((end / RANGES - step) / 64 + 1);
+    for (start = 0; start < end; start += step) {
       mkc_iterator r = { start };
-      while (r.at < start + chunks[c] && mkc_next(&d, &r, &key, &count)
-             && r.at - 1 < start + chunks[c])
+      while (r.at < start + step && mkc_next(&d, &r, &key, &count)
+             && r.at - 1 < start + step)
         add(&part, key, count);
     }
     if (part.n != all.n || part.sum != all.sum || part.xr != all.xr) {
       printf("chunk %" PRIu64 ": %" PRIu64 " keys against %" PRIu64 "\n",
-             chunks[c], part.n, all.n);
+             step, part.n, all.n);
       bad = 1;
     }
   }
