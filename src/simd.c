@@ -43,7 +43,7 @@ void dec_avx2(u8 * p, sz n) {
                 g = _mm256_set1_epi8('G'), t = _mm256_set1_epi8('T'),
                 ones = _mm256_set1_epi8((char) 0xFF);
   for (; n - i >= 32; i += 32) {
-    __m256i x = _mm256_loadu_si256((const __m256i *) (p + i)), valid, code;
+    __m256i x = _mm256_loadu_si256((const __m256i *) (const void *) (p + i)), valid, code;
     x = _mm256_and_si256(x, upper);
     valid = _mm256_or_si256(_mm256_cmpeq_epi8(x, a), _mm256_cmpeq_epi8(x, c));
     valid = _mm256_or_si256(valid, _mm256_cmpeq_epi8(x, g));
@@ -51,7 +51,7 @@ void dec_avx2(u8 * p, sz n) {
     code = _mm256_xor_si256(_mm256_srli_epi16(x, 1), _mm256_srli_epi16(x, 2));
     code = _mm256_and_si256(code, three);
     code = _mm256_or_si256(code, _mm256_andnot_si256(valid, ones));
-    _mm256_storeu_si256((__m256i *) (p + i), code);
+    _mm256_storeu_si256((__m256i *) (void *) (p + i), code);
   }
   for (; i < n; i++) p[i] = base(p[i]);
 }
@@ -122,7 +122,7 @@ void scan_ranks_avx2(const u8 * p, sz count, u32 m, u32 * out) {
     x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 15));
     x = _mm256_mullo_epi32(x, c2);
     x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 16));
-    _mm256_storeu_si256((__m256i *) (out + j),
+    _mm256_storeu_si256((__m256i *) (void *) (out + j),
                         _mm256_or_si256(_mm256_srli_epi32(x, 2), tier));
   }
   for (; j < count; j++) {
@@ -134,8 +134,8 @@ void scan_ranks_avx2(const u8 * p, sz count, u32 m, u32 * out) {
 }
 
 static INLINE __m256i min8(const u32 * x, const u32 * y) {
-  return _mm256_min_epu32(_mm256_loadu_si256((const __m256i *) x),
-                          _mm256_loadu_si256((const __m256i *) y));
+  return _mm256_min_epu32(_mm256_loadu_si256((const __m256i *) (const void *) x),
+                          _mm256_loadu_si256((const __m256i *) (const void *) y));
 }
 
 void scan_minima_avx2(const u32 * r, sz len, u32 w, u32 * a, u32 * out) {
@@ -146,12 +146,12 @@ void scan_minima_avx2(const u32 * r, sz len, u32 w, u32 * a, u32 * out) {
   while (2 * span <= w) {
     n = valid - span;
     for (j = 0; j + 8 <= n; j += 8)
-      _mm256_storeu_si256((__m256i *) (a + j), min8(a + j, a + j + span));
+      _mm256_storeu_si256((__m256i *) (void *) (a + j), min8(a + j, a + j + span));
     for (; j < n; j++) a[j] = a[j] < a[j + span] ? a[j] : a[j + span];
     valid = n;  span *= 2;
   }
   n = len - w + 1;  d = w - span;
   for (j = 0; j + 8 <= n; j += 8)
-    _mm256_storeu_si256((__m256i *) (out + j), min8(a + j, a + j + d));
+    _mm256_storeu_si256((__m256i *) (void *) (out + j), min8(a + j, a + j + d));
   for (; j < n; j++) out[j] = a[j] < a[j + d] ? a[j] : a[j + d];
 }

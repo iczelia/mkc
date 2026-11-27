@@ -471,8 +471,8 @@ static inline int mkc_cpu_avx2(int bmi) {
   m |= (unsigned) _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64( \
          _mm256_and_si256(_mm256_xor_si256(_mm256_srlv_epi64( \
            _mm256_shuffle_epi8(_mm256_loadu2_m128i( \
-               (const __m128i *) (p + MG_WIN(W, 4 * (v) + 2)), \
-               (const __m128i *) (p + MG_WIN(W, 4 * (v)))), \
+               (const __m128i *) (const void *) (p + MG_WIN(W, 4 * (v) + 2)), \
+               (const __m128i *) (const void *) (p + MG_WIN(W, 4 * (v)))), \
              _mm256_setr_epi8(MG_LANE(W, 4 * (v)), \
                               MG_LANE(W, 4 * (v) + 2))), \
            _mm256_setr_epi64x(MG_SHIFT(W, 4 * (v)), \
@@ -638,13 +638,13 @@ static inline unsigned mp_find_fast(const mkc_index * d,
   unsigned m = 0, x;
   for (x = 0; x < 4; x++) {
     __m256i y = _mm256_loadu2_m128i(
-        (const __m128i *) (p + d->mp_win[2 * x + 1]),
-        (const __m128i *) (p + d->mp_win[2 * x]));
+        (const __m128i *) (const void *) (p + d->mp_win[2 * x + 1]),
+        (const __m128i *) (const void *) (p + d->mp_win[2 * x]));
     y = _mm256_shuffle_epi8(
-        y, _mm256_loadu_si256((const __m256i *) d->mp_shuf[x]));
+        y, _mm256_loadu_si256((const __m256i *) (const void *) d->mp_shuf[x]));
     y = _mm256_and_si256(
         _mm256_srlv_epi64(
-            y, _mm256_loadu_si256((const __m256i *) d->mp_shift[x])),
+            y, _mm256_loadu_si256((const __m256i *) (const void *) d->mp_shift[x])),
         mask);
     m |= (unsigned) _mm256_movemask_pd(_mm256_castsi256_pd(
              _mm256_cmpeq_epi64(y, low))) << 4 * x;
@@ -695,8 +695,8 @@ static inline uint64_t mp_count_fast(const mkc_index * d, uint64_t h) {
   m |= (unsigned) _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64( \
          _mm256_and_si256(_mm256_srlv_epi64(_mm256_shuffle_epi8( \
              _mm256_loadu2_m128i( \
-               (const __m128i *) (p + MP_WIN(L, 2 * (v) + 1)), \
-               (const __m128i *) (p + MP_WIN(L, 2 * (v)))), \
+               (const __m128i *) (const void *) (p + MP_WIN(L, 2 * (v) + 1)), \
+               (const __m128i *) (const void *) (p + MP_WIN(L, 2 * (v)))), \
              _mm256_setr_epi8(MP_SB8(L, v, 0), MP_SB8(L, v, 8), \
                               MP_SB8(L, v, 16), MP_SB8(L, v, 24))), \
            _mm256_setr_epi64x(MP_SHIFT(L, 4 * (v)), \
