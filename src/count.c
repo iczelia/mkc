@@ -744,7 +744,6 @@ static void count_worker(void * arg, u32 id, u32 m) {
   spool_stats * st = &J->stats[id];
   u32 x;
   previous_distinct = 0;
-  if (J->batch_slices) spool_pages = xcalloc(SPOOL_PARTS, sizeof *spool_pages);
   fit_area = xpages((FIT_BUFFER + FIT_SCRATCH) * 8);
   s = xmalloc(sizeof *s);
   while ((x = fetch_add(&J->next, 1u)) < nbins) {
@@ -759,6 +758,8 @@ static void count_worker(void * arg, u32 id, u32 m) {
     if (!occ) { bin_path(path, b, "b");  os_remove(path);  continue; }
     if (ld_acq(&J->misses) < 32 || x % 64 == 0) {
       if (count_tables[K](b, cap, a, tmp, s, st)) {
+        if (J->batch_slices && !spool_pages)
+          spool_pages = xcalloc(SPOOL_PARTS, sizeof *spool_pages);
         fetch_add(&J->tabled, 1u);  st_rel(&J->misses, 0u);
         continue;
       }

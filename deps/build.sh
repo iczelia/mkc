@@ -54,9 +54,11 @@ fetch() {
     echo "deps: checksum mismatch for $file" >&2;  exit 1
   fi
   rm -rf "$work/$1"
+  skip=$1/.none
+  case $1 in zstd-*) skip=$1/tests ;; esac
   case $file in
-    *.xz) xz -dc "$file" | tar xf - -C "$work" ;;
-    *)    gzip -dc "$file" | tar xf - -C "$work" ;;
+    *.xz) xz -dc "$file" | tar xf - -C "$work" --exclude="$skip" ;;
+    *)    gzip -dc "$file" | tar xf - -C "$work" --exclude="$skip" ;;
   esac
 }
 
