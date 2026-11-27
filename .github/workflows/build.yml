@@ -27,6 +27,7 @@ jobs:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     needs: dist
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -43,12 +44,16 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           name: source
+      - if: runner.os == 'macOS'
+        run: brew install coreutils
       - run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
           tar -xzf source.tar.gz --strip-components=1
-          ./configure
+          ./configure MKC_TEST_TIMEOUT_SECONDS=1800
           make -j3
           make -j3 check VERBOSE=1
+      - if: always()
+        run: for f in tests/*.log; do echo "== $f"; tail -n 40 "$f"; done
 
   cross:
     name: Linux / ${{ matrix.arch }} (QEMU)

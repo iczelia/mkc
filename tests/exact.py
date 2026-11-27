@@ -19,11 +19,14 @@ def canonical(s):
 
 
 def reference(records, k):
-    c = collections.Counter()
-    for rec in records:
+    raw = collections.Counter()
+    for rec, times in collections.Counter(records).items():
         for part in ''.join(ch if ch in 'ACGT' else ' ' for ch in rec.upper()).split():
             for i in range(len(part)-k+1):
-                c[canonical(part[i:i+k])] += 1
+                raw[part[i:i+k]] += times
+    c = collections.Counter()
+    for s, n in raw.items():
+        c[canonical(s)] += n
     return c
 
 

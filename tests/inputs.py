@@ -11,12 +11,18 @@ import collections, gzip, os, random, re, struct, subprocess, sys, tempfile, thr
 mkc, pack = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 small = len(sys.argv) > 3 and sys.argv[3] == 'small'
 rng = random.Random(11)
+genome = ''.join(rng.choices('ACGT', k=1 << 18))
+
+
+def piece(n):
+    at = rng.randrange(len(genome) - n)
+    return genome[at:at+n]
 
 
 def fastq(n):
     out = []
     for i in range(n):
-        s = ''.join(rng.choices('ACGT', k=rng.choice([50, 100, 150])))
+        s = piece(rng.choice([50, 100, 150]))
         if i % 17 == 0: s = s[:30] + 'N' + s[31:]
         out.append(f'@r{i}\n{s}\n+\n{"I"*len(s)}\n')
     return ''.join(out).encode()
@@ -26,7 +32,7 @@ def fasta(n):
     unit = ''.join(rng.choices('ACGT', k=1000))
     out = []
     for i in range(n):
-        s = ''.join(rng.choices('ACGT', k=rng.choice([100, 5000, 30000])))
+        s = piece(rng.choice([100, 5000, 30000]))
         if i % 3 == 0: s += unit * 3       # repeats, so blocks compress unevenly
         out.append(f'>c{i}\n' + '\n'.join(s[j:j+80] for j in range(0, len(s), 80)) + '\n')
     return ''.join(out).encode()
